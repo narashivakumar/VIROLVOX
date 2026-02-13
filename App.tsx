@@ -1,3 +1,4 @@
+
 import React, { useState, useRef, useEffect } from 'react';
 import { 
   Sparkles, 
@@ -12,15 +13,18 @@ import {
   Mic,
   Music,
   Trash2,
+  Settings,
   Globe,
   Monitor,
   RefreshCw,
-  LayoutGrid,
 } from 'lucide-react';
 import { 
   generateViralContent, 
   generateSpeech, 
-  generateImage 
+  generateImageGemini,
+  generateImageImageRouter,
+  generateImageCloudflare,
+  generateImagePollinations
 } from './services/geminiService';
 import { 
   GenerationState, 
@@ -28,7 +32,9 @@ import {
   Language, 
   VideoQuality, 
   SavedScript, 
-  StoryFrame 
+  StoryFrame,
+  ImageEngine,
+  CloudflareConfig
 } from './types';
 import { decodeBase64, createWavBlob, createMp3Blob } from './utils/audioUtils';
 import { renderStoryToVideo } from './utils/videoUtils';
@@ -51,6 +57,12 @@ export default function App() {
   const [videoProgress, setVideoProgress] = useState<number | null>(null);
   const [savedScripts, setSavedScripts] = useState<SavedScript[]>([]);
   const [frameStatuses, setFrameStatuses] = useState<Record<number, 'loading' | 'ready' | 'error'>>({});
+  
+  // Settings for external keys
+  const [showSettings, setShowSettings] = useState(false);
+  const [imageEngine, setImageEngine] = useState<ImageEngine>('gemini');
+  const [imageRouterKey, setImageRouterKey] = useState('');
+  const [cfConfig, setCfConfig] = useState<CloudflareConfig>({ workerUrl: '', apiKey: '' });
 
   const [state, setState] = useState<GenerationState>({
     isGenerating: false,
@@ -79,6 +91,15 @@ export default function App() {
     localStorage.setItem('viralvox_scripts', JSON.stringify(savedScripts));
   }, [savedScripts]);
 
+  const handleGenerateImage = async (prompt: string, type: string) => {
+    switch (imageEngine) {
+      case 'imagerouter': return await generateImageImageRouter(prompt, imageRouterKey);
+      case 'cloudflare': return await generateImageCloudflare(prompt, cfConfig);
+      case 'pollinations': return await generateImagePollinations(prompt);
+      default: return await generateImageGemini(prompt, type);
+    }
+  };
+
   const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!topic.trim()) return;
@@ -99,9 +120,11 @@ export default function App() {
           const base64Audio = await generateSpeech(content.script.fullText, voice, 'Storyteller', language);
           const binaryData = decodeBase64(base64Audio);
           const pcmData = new Int16Array(binaryData.buffer, 0, binaryData.byteLength / 2);
+          
           const wavBlob = createWavBlob(pcmData, 24000);
           const mp3Blob = createMp3Blob(pcmData, 24000);
           const audioUrl = URL.createObjectURL(wavBlob);
+          
           setState(prev => ({ ...prev, audioBlobWav: wavBlob, audioBlobMp3: mp3Blob, audioUrl }));
         } catch (err) {
           console.error("Audio generation failed", err);
@@ -113,7 +136,7 @@ export default function App() {
       for (const frame of content.template.frames) {
         setFrameStatuses(prev => ({ ...prev, [frame.id]: 'loading' }));
         try {
-          const imageUrl = await generateImage(frame.visual, videoType);
+          const imageUrl = await handleGenerateImage(frame.visual, videoType);
           setState(prev => {
             if (!prev.content) return prev;
             const updatedFrames = prev.content.template.frames.map(f => f.id === frame.id ? { ...f, imageUrl } : f);
@@ -218,13 +241,45 @@ export default function App() {
             <h1 className="text-xl font-bold tracking-tight viral-font">ViralVox</h1>
           </div>
           <div className="flex items-center gap-4">
+             <button onClick={() => setShowSettings(!showSettings)} className="p-2 bg-slate-800 rounded-lg hover:bg-slate-700 transition-colors">
+               <Settings className="w-5 h-5" />
+             </button>
              <div className="hidden md:flex items-center gap-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest">
               <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
-              Gemini 2.5 Active
+              Engine Connected
             </div>
           </div>
         </div>
       </header>
+
+      {showSettings && (
+        <div className="bg-slate-900 border-b border-slate-800 p-6 animate-in slide-in-from-top duration-300">
+          <div className="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-8">
+            <div className="space-y-3">
+              <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Image Engine</label>
+              <select value={imageEngine} onChange={(e) => setImageEngine(e.target.value as ImageEngine)} className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-sm outline-none">
+                <option value="gemini">Gemini 2.5 (Free Model)</option>
+                <option value="imagerouter">ImageRouter API</option>
+                <option value="cloudflare">Cloudflare Worker</option>
+                <option value="pollinations">Pollinations (Free)</option>
+              </select>
+            </div>
+            {imageEngine === 'imagerouter' && (
+              <div className="space-y-3">
+                <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">ImageRouter Key</label>
+                <input type="password" value={imageRouterKey} onChange={(e) => setImageRouterKey(e.target.value)} placeholder="Enter API Key" className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-sm outline-none" />
+              </div>
+            )}
+            {imageEngine === 'cloudflare' && (
+              <div className="space-y-3">
+                <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Worker Config</label>
+                <input type="text" value={cfConfig.workerUrl} onChange={(e) => setCfConfig({...cfConfig, workerUrl: e.target.value})} placeholder="URL" className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-sm outline-none mb-2" />
+                <input type="password" value={cfConfig.apiKey} onChange={(e) => setCfConfig({...cfConfig, apiKey: e.target.value})} placeholder="API Key" className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-sm outline-none" />
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       <main className="flex-1 max-w-7xl mx-auto w-full px-4 py-8 grid grid-cols-1 lg:grid-cols-12 gap-8">
         {/* Sidebar Controls */}
@@ -263,13 +318,13 @@ export default function App() {
               
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-500 uppercase">Language</label>
+                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Language</label>
                   <select value={language} onChange={(e) => setLanguage(e.target.value as Language)} className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-4 py-2 text-xs outline-none">
                     {LANGUAGES.map(l => <option key={l} value={l}>{l}</option>)}
                   </select>
                 </div>
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-500 uppercase">Voice</label>
+                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Speaker</label>
                   <select value={voice} onChange={(e) => setVoice(e.target.value as VoiceName)} className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-4 py-2 text-xs outline-none">
                     {VOICES.map(v => <option key={v} value={v}>{v}</option>)}
                   </select>
@@ -277,7 +332,7 @@ export default function App() {
               </div>
 
               <div className="space-y-1">
-                <label className="text-[10px] font-bold text-slate-500 uppercase">Video Type</label>
+                <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Video Style</label>
                 <select value={videoType} onChange={(e) => setVideoType(e.target.value)} className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-4 py-2 text-xs outline-none">
                   {VIDEO_TYPES.map(vt => <option key={vt} value={vt}>{vt}</option>)}
                 </select>
@@ -374,13 +429,13 @@ export default function App() {
                             {frameStatuses[f.id] === 'loading' ? (
                               <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900/50 backdrop-blur-sm">
                                 <Loader2 className="w-6 h-6 animate-spin text-indigo-500 mb-2" />
-                                <span className="text-[8px] font-bold text-slate-500">GENERATING...</span>
+                                <span className="text-[8px] font-bold text-slate-500 uppercase tracking-tighter">Painting...</span>
                               </div>
                             ) : f.imageUrl ? (
                               <>
                                 <img src={f.imageUrl} className="w-full h-full object-cover transition-transform group-hover:scale-110 duration-[2s]" alt={f.visual} />
                                 <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity">
-                                  <button onClick={() => generateImage(f.visual, videoType)} className="p-2 bg-black/60 backdrop-blur-md rounded-xl text-white hover:bg-indigo-600 transition-colors shadow-lg">
+                                  <button onClick={() => handleGenerateImage(f.visual, videoType)} className="p-2 bg-black/60 backdrop-blur-md rounded-xl text-white hover:bg-indigo-600 transition-colors shadow-lg">
                                     <RefreshCw className="w-4 h-4" />
                                   </button>
                                 </div>
@@ -450,8 +505,8 @@ export default function App() {
         <div className="max-w-7xl mx-auto px-4 flex flex-col md:flex-row items-center justify-between gap-6">
           <p className="text-[10px] font-black text-slate-600 uppercase tracking-[0.4em]">ViralVox Synthesizer Engine v3.0</p>
           <div className="flex flex-wrap justify-center gap-8 items-center text-[9px] font-black text-slate-500 uppercase tracking-[0.2em]">
-            <span className="flex items-center gap-2"><div className="w-2 h-2 rounded-full bg-green-500 shadow-lg shadow-green-500/50"></div> Gemini 2.5 Active</span>
-            <span className="flex items-center gap-2"><Globe className="w-3.5 h-3.5 text-indigo-500" /> Multilingual Mode</span>
+            <span className="flex items-center gap-2"><div className="w-2 h-2 rounded-full bg-green-500 shadow-lg shadow-green-500/50"></div> Engine Active</span>
+            <span className="flex items-center gap-2"><Globe className="w-3.5 h-3.5 text-indigo-500" /> Multilingual Support</span>
           </div>
         </div>
       </footer>

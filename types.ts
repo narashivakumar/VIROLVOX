@@ -1,3 +1,9 @@
+
+export type Language = 'English' | 'Hindi' | 'Telugu';
+export type VideoQuality = '720p' | '1080p' | '1440p';
+export type VoiceName = 'Kore' | 'Puck' | 'Charon' | 'Fenrir' | 'Zephyr';
+export type ImageEngine = 'gemini' | 'imagerouter' | 'cloudflare' | 'pollinations';
+
 export interface ViralScript {
   hook: string;
   body: string;
@@ -42,10 +48,6 @@ export interface GeneratedContent {
   facebookMetadata: FacebookMetadata;
 }
 
-export type VoiceName = 'Kore' | 'Puck' | 'Charon' | 'Fenrir' | 'Zephyr';
-export type Language = 'English' | 'Hindi' | 'Telugu';
-export type VideoQuality = '720p' | '1080p' | '1440p';
-
 export interface GenerationState {
   isGenerating: boolean;
   isGeneratingImages: boolean;
@@ -57,9 +59,6 @@ export interface GenerationState {
   language: Language;
 }
 
-/**
- * Interface for scripts saved in local storage
- */
 export interface SavedScript {
   id: string;
   topic: string;
@@ -71,9 +70,11 @@ export interface SavedScript {
   timestamp: number;
 }
 
-/**
- * Interface representing a visual scene in the storyboard
- */
+export interface CloudflareConfig {
+  workerUrl: string;
+  apiKey: string;
+}
+
 export interface Scene {
   id: string;
   sceneNumber: string;
