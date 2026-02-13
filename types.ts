@@ -56,3 +56,31 @@ export interface GenerationState {
   audioUrl: string | null;
   language: Language;
 }
+
+/**
+ * Interface for scripts saved in local storage
+ */
+export interface SavedScript {
+  id: string;
+  topic: string;
+  niche: string;
+  videoType: string;
+  tone: string;
+  language: Language;
+  content: GeneratedContent;
+  timestamp: number;
+}
+
+/**
+ * Interface representing a visual scene in the storyboard
+ */
+export interface Scene {
+  id: string;
+  sceneNumber: string;
+  title: string;
+  description: string;
+  visualPrompt: string;
+  imageUrl?: string;
+  isGenerating?: boolean;
+  error?: string;
+}

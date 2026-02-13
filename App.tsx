@@ -1,52 +1,57 @@
-
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { 
   Sparkles, 
-  Mic, 
   Download, 
   Loader2, 
   ArrowRight, 
-  Clapperboard,
   Image as ImageIcon,
   Video,
   Youtube,
   Instagram,
   Facebook,
-  Copy,
-  FileText,
-  FileCode,
-  Hash,
+  Mic,
+  Music,
+  Trash2,
+  Globe,
   Monitor,
   RefreshCw,
   LayoutGrid,
-  ChevronDown,
-  Music
 } from 'lucide-react';
-import { generateViralContent, generateSpeech, generateImage } from './services/geminiService';
-import { GenerationState, VoiceName, Language, VideoQuality } from './types';
+import { 
+  generateViralContent, 
+  generateSpeech, 
+  generateImage 
+} from './services/geminiService';
+import { 
+  GenerationState, 
+  VoiceName, 
+  Language, 
+  VideoQuality, 
+  SavedScript, 
+  StoryFrame 
+} from './types';
 import { decodeBase64, createWavBlob, createMp3Blob } from './utils/audioUtils';
 import { renderStoryToVideo } from './utils/videoUtils';
 import { NICHE_CATEGORIES, NicheCategory } from './constants/niches';
 
 const VOICES: VoiceName[] = ['Kore', 'Puck', 'Charon', 'Fenrir', 'Zephyr'];
-const STYLES = ['Motivational', 'Funny', 'Suspenseful', 'Educational', 'Controversial'];
 const LANGUAGES: Language[] = ['English', 'Hindi', 'Telugu'];
-const QUALITIES: VideoQuality[] = ['720p', '1080p', '1440p'];
-
-type TabType = 'story' | 'youtube' | 'instagram' | 'facebook';
+const QUALITIES: VideoQuality[] = ['720p', '1080p'];
+const VIDEO_TYPES = ['Storytelling', 'Devotional', 'Horror', 'Children', 'Educational', 'Finance'];
 
 export default function App() {
   const [topic, setTopic] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<NicheCategory | null>(null);
   const [selectedSubNiche, setSelectedSubNiche] = useState<string>('');
-  const [style, setStyle] = useState(STYLES[0]);
+  const [videoType, setVideoType] = useState(VIDEO_TYPES[0]);
   const [voice, setVoice] = useState<VoiceName>('Kore');
   const [language, setLanguage] = useState<Language>('English');
   const [quality, setQuality] = useState<VideoQuality>('1080p');
+  const [activeTab, setActiveTab] = useState<'story' | 'youtube' | 'instagram' | 'facebook' | 'vault'>('story');
   const [videoProgress, setVideoProgress] = useState<number | null>(null);
-  const [activeTab, setActiveTab] = useState<TabType>('story');
-  const [regeneratingFrames, setRegeneratingFrames] = useState<Record<number, boolean>>({});
-  
+  const [savedScripts, setSavedScripts] = useState<SavedScript[]>([]);
+  const [frameStatuses, setFrameStatuses] = useState<Record<number, 'loading' | 'ready' | 'error'>>({});
+
   const [state, setState] = useState<GenerationState>({
     isGenerating: false,
     isGeneratingImages: false,
@@ -60,101 +65,108 @@ export default function App() {
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  // Auto-set topic placeholder when sub-niche changes
   useEffect(() => {
-    if (selectedSubNiche) {
-      setTopic(`Highly engaging content about ${selectedSubNiche}`);
+    const stored = localStorage.getItem('viralvox_scripts');
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) setSavedScripts(parsed);
+      } catch (e) { console.error(e); }
     }
-  }, [selectedSubNiche]);
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('viralvox_scripts', JSON.stringify(savedScripts));
+  }, [savedScripts]);
 
   const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!topic.trim()) return;
 
     setState(prev => ({ 
-      ...prev, 
-      isGenerating: true, 
-      isGeneratingImages: true, 
-      error: null, 
-      content: null,
-      language: language 
+      ...prev, isGenerating: true, isGeneratingImages: true, error: null, content: null, audioUrl: null, audioBlobWav: null, audioBlobMp3: null, language 
     }));
+    setFrameStatuses({});
 
     try {
-      const content = await generateViralContent(topic, style, language, selectedSubNiche);
+      const content = await generateViralContent(topic, videoType, 'Viral', language, selectedSubNiche);
       setState(prev => ({ ...prev, content, isGenerating: false }));
+      setActiveTab('story');
 
+      // 1. Generate Audio concurrently
       const audioPromise = (async () => {
-        const base64Audio = await generateSpeech(content.script.fullText, voice, language);
-        const binaryData = decodeBase64(base64Audio);
-        const pcmData = new Int16Array(binaryData.buffer);
-        const wavBlob = createWavBlob(pcmData, 24000);
-        const mp3Blob = createMp3Blob(pcmData, 24000);
-        return { wavBlob, mp3Blob, audioUrl: URL.createObjectURL(wavBlob) };
+        try {
+          const base64Audio = await generateSpeech(content.script.fullText, voice, 'Storyteller', language);
+          const binaryData = decodeBase64(base64Audio);
+          const pcmData = new Int16Array(binaryData.buffer, 0, binaryData.byteLength / 2);
+          const wavBlob = createWavBlob(pcmData, 24000);
+          const mp3Blob = createMp3Blob(pcmData, 24000);
+          const audioUrl = URL.createObjectURL(wavBlob);
+          setState(prev => ({ ...prev, audioBlobWav: wavBlob, audioBlobMp3: mp3Blob, audioUrl }));
+        } catch (err) {
+          console.error("Audio generation failed", err);
+        }
       })();
 
-      const imagesPromise = Promise.all(
-        content.template.frames.map(async (frame) => {
-          try {
-            const imageUrl = await generateImage(frame.visual, style);
-            return { ...frame, imageUrl };
-          } catch (err) {
-            console.error(`Failed frame ${frame.id}`, err);
-            return frame;
-          }
-        })
-      );
+      // 2. Generate Images Frame by Frame
+      const framesWithImages: StoryFrame[] = [];
+      for (const frame of content.template.frames) {
+        setFrameStatuses(prev => ({ ...prev, [frame.id]: 'loading' }));
+        try {
+          const imageUrl = await generateImage(frame.visual, videoType);
+          setState(prev => {
+            if (!prev.content) return prev;
+            const updatedFrames = prev.content.template.frames.map(f => f.id === frame.id ? { ...f, imageUrl } : f);
+            return { ...prev, content: { ...prev.content, template: { ...prev.content.template, frames: updatedFrames } } };
+          });
+          setFrameStatuses(prev => ({ ...prev, [frame.id]: 'ready' }));
+          framesWithImages.push({ ...frame, imageUrl });
+        } catch (err) {
+          setFrameStatuses(prev => ({ ...prev, [frame.id]: 'error' }));
+          framesWithImages.push(frame);
+        }
+      }
 
-      const [audioResult, framesWithImages] = await Promise.all([audioPromise, imagesPromise]);
+      await audioPromise;
 
-      setState(prev => ({
-        ...prev,
-        isGeneratingImages: false,
-        content: prev.content ? {
-          ...prev.content,
-          template: { ...prev.content.template, frames: framesWithImages }
-        } : null,
-        audioBlobWav: audioResult.wavBlob,
-        audioBlobMp3: audioResult.mp3Blob,
-        audioUrl: audioResult.audioUrl
-      }));
+      const newSaved: SavedScript = {
+        id: Date.now().toString(),
+        topic,
+        niche: selectedSubNiche || 'General',
+        videoType,
+        tone: 'Viral',
+        language,
+        content: { ...content, template: { ...content.template, frames: framesWithImages } },
+        timestamp: Date.now()
+      };
+      setSavedScripts(prev => [newSaved, ...prev]);
+      setState(prev => ({ ...prev, isGeneratingImages: false }));
     } catch (err: any) {
-      console.error(err);
-      setState(prev => ({ 
-        ...prev, 
-        isGenerating: false, 
-        isGeneratingImages: false,
-        error: err.message || 'Something went wrong.' 
-      }));
+      setState(prev => ({ ...prev, isGenerating: false, isGeneratingImages: false, error: err.message || 'Generation failed.' }));
     }
   };
 
-  const handleRegenerateImage = async (frameId: number) => {
-    if (!state.content) return;
-    const frame = state.content.template.frames.find(f => f.id === frameId);
-    if (!frame) return;
-
-    setRegeneratingFrames(prev => ({ ...prev, [frameId]: true }));
+  const handleDownloadVideo = async () => {
+    if (!state.content || !state.audioUrl) return;
+    setVideoProgress(0);
     try {
-      const newImageUrl = await generateImage(frame.visual, style);
-      setState(prev => {
-        if (!prev.content) return prev;
-        const newFrames = prev.content.template.frames.map(f => 
-          f.id === frameId ? { ...f, imageUrl: newImageUrl } : f
-        );
-        return {
-          ...prev,
-          content: {
-            ...prev.content,
-            template: { ...prev.content.template, frames: newFrames }
-          }
-        };
+      const videoBlob = await renderStoryToVideo({
+        frames: state.content.template.frames,
+        audioUrl: state.audioUrl,
+        language: state.language,
+        quality: quality,
+        onProgress: (p) => setVideoProgress(Math.round(p)),
       });
+      const url = URL.createObjectURL(videoBlob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `viralvox-${quality}-${Date.now()}.mp4`;
+      a.click();
+      URL.revokeObjectURL(url);
     } catch (err) {
-      console.error("Regeneration failed", err);
-      alert("Failed to regenerate this image. Please try again.");
+      alert("Export failed.");
     } finally {
-      setRegeneratingFrames(prev => ({ ...prev, [frameId]: false }));
+      setVideoProgress(null);
     }
   };
 
@@ -164,49 +176,29 @@ export default function App() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `viralvox-audio-${Date.now()}.${format}`;
+      a.download = `viralvox-audio-${language}-${Date.now()}.${format}`;
       a.click();
       URL.revokeObjectURL(url);
     }
   };
 
-  const handleDownloadText = (content: string, filename: string) => {
-    const blob = new Blob([content], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${filename}-${Date.now()}.txt`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const handleCopy = (text: string) => {
-    navigator.clipboard.writeText(text);
-  };
-
-  const handleDownloadVideo = async () => {
-    if (!state.content || !state.audioUrl) return;
-    try {
-      setVideoProgress(0);
-      const videoBlob = await renderStoryToVideo({
-        frames: state.content.template.frames,
-        audioUrl: state.audioUrl,
-        language: state.language,
-        quality: quality,
-        onProgress: (p) => setVideoProgress(Math.round(p))
-      });
-      const videoUrl = URL.createObjectURL(videoBlob);
-      const a = document.createElement('a');
-      a.href = videoUrl;
-      a.download = `viralvox-video-${quality}-${Date.now()}.mp4`;
-      a.click();
-      URL.revokeObjectURL(videoUrl);
-    } catch (err) {
-      console.error(err);
-      alert("Video export failed.");
-    } finally {
-      setVideoProgress(null);
-    }
+  const handleLoadSaved = (saved: SavedScript) => {
+    setState(prev => ({
+      ...prev,
+      content: saved.content,
+      language: saved.language,
+      error: null,
+      audioUrl: null,
+      audioBlobWav: null,
+      audioBlobMp3: null
+    }));
+    setTopic(saved.topic);
+    setVideoType(saved.videoType);
+    setLanguage(saved.language);
+    setActiveTab('story');
+    const statuses: Record<number, 'ready'> = {};
+    saved.content.template.frames.forEach(f => statuses[f.id] = 'ready');
+    setFrameStatuses(statuses);
   };
 
   const getLangClass = (lang: Language) => {
@@ -215,289 +207,254 @@ export default function App() {
     return '';
   };
 
-  const MetadataField = ({ label, value, icon: Icon, filename }: { label: string, value: string, icon: any, filename: string }) => (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <label className="text-xs font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
-          <Icon className="w-3 h-3" /> {label}
-        </label>
-        <div className="flex gap-2">
-          <button onClick={() => handleCopy(value)} className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors">
-            <Copy className="w-3.5 h-3.5" />
-          </button>
-          <button onClick={() => handleDownloadText(value, filename)} className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors">
-            <Download className="w-3.5 h-3.5" />
-          </button>
-        </div>
-      </div>
-      <div className="bg-slate-950 border border-slate-800 p-4 rounded-xl text-sm text-slate-300 whitespace-pre-wrap leading-relaxed max-h-[200px] overflow-y-auto custom-scrollbar">
-        {value}
-      </div>
-    </div>
-  );
-
   return (
-    <div className={`min-h-screen bg-slate-950 text-slate-100 flex flex-col ${getLangClass(state.language)}`}>
-      <header className="border-b border-slate-800 bg-slate-900/50 backdrop-blur-md sticky top-0 z-50">
+    <div className={`min-h-screen bg-[#020617] text-slate-100 flex flex-col font-sans ${getLangClass(state.language)}`}>
+      <header className="border-b border-slate-800 bg-slate-950/80 backdrop-blur-xl sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <div className="bg-gradient-to-tr from-pink-500 to-violet-500 p-2 rounded-lg"><Sparkles className="w-6 h-6 text-white" /></div>
-            <h1 className="text-2xl font-bold tracking-tight viral-font bg-gradient-to-r from-pink-400 to-violet-400 bg-clip-text text-transparent">ViralVox</h1>
+            <div className="bg-gradient-to-br from-indigo-500 to-purple-600 p-2 rounded-xl">
+              <Sparkles className="w-5 h-5 text-white" />
+            </div>
+            <h1 className="text-xl font-bold tracking-tight viral-font">ViralVox</h1>
+          </div>
+          <div className="flex items-center gap-4">
+             <div className="hidden md:flex items-center gap-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+              <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+              Gemini 2.5 Active
+            </div>
           </div>
         </div>
       </header>
 
       <main className="flex-1 max-w-7xl mx-auto w-full px-4 py-8 grid grid-cols-1 lg:grid-cols-12 gap-8">
-        <section className="lg:col-span-4 space-y-6">
-          <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-xl">
-            <h2 className="text-xl font-bold mb-4 flex items-center gap-2"><Mic className="w-5 h-5 text-pink-500" />Creator Studio</h2>
+        {/* Sidebar Controls */}
+        <aside className="lg:col-span-4 space-y-6">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-2xl">
+            <h2 className="text-sm font-bold mb-6 flex items-center gap-2 text-indigo-400 uppercase tracking-widest">Creator Studio</h2>
             <form onSubmit={handleGenerate} className="space-y-4">
-              
-              {/* Niche Selection */}
-              <div className="space-y-4 p-4 bg-slate-800/50 rounded-xl border border-slate-700">
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-1.5">
-                    <LayoutGrid className="w-3 h-3" /> Select Niche Category
-                  </label>
-                  <select 
-                    onChange={(e) => {
-                      const cat = NICHE_CATEGORIES.find(c => c.name === e.target.value);
-                      setSelectedCategory(cat || null);
-                      setSelectedSubNiche('');
-                    }}
-                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-sm focus:ring-2 focus:ring-pink-500/50 outline-none"
-                  >
-                    <option value="">Choose a category...</option>
-                    {NICHE_CATEGORIES.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
-                  </select>
-                </div>
-
+              <div className="space-y-3">
+                <select 
+                  onChange={(e) => setSelectedCategory(NICHE_CATEGORIES.find(c => c.name === e.target.value) || null)} 
+                  className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-indigo-500/50"
+                >
+                  <option value="">Select Category</option>
+                  {NICHE_CATEGORIES.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
+                </select>
                 {selectedCategory && (
-                  <div className="animate-in fade-in slide-in-from-top-2 duration-300">
-                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-1.5">
-                      <ChevronDown className="w-3 h-3" /> Select Topic Niche
-                    </label>
-                    <select 
-                      value={selectedSubNiche}
-                      onChange={(e) => setSelectedSubNiche(e.target.value)}
-                      className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-sm focus:ring-2 focus:ring-pink-500/50 outline-none"
-                    >
-                      <option value="">Choose a sub-niche...</option>
-                      {selectedCategory.subNiches.map(sn => <option key={sn} value={sn}>{sn}</option>)}
-                    </select>
-                  </div>
+                  <select 
+                    value={selectedSubNiche} 
+                    onChange={(e) => setSelectedSubNiche(e.target.value)} 
+                    className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-4 py-3 text-sm outline-none mt-2 animate-in fade-in"
+                  >
+                    <option value="">Select Sub-niche</option>
+                    {selectedCategory.subNiches.map(sn => <option key={sn} value={sn}>{sn}</option>)}
+                  </select>
                 )}
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">Topic / Custom Prompt</label>
-                <textarea 
-                  value={topic} 
-                  onChange={(e) => setTopic(e.target.value)} 
-                  placeholder="E.g., Benefits of daily exercise..." 
-                  className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-pink-500/50 outline-none h-24" 
-                  required 
-                />
-              </div>
-
-              <div className="grid grid-cols-1 gap-4">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">Language</label>
-                  <select value={language} onChange={(e) => setLanguage(e.target.value as Language)} className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-sm focus:ring-2 focus:ring-pink-500/50 outline-none">
+              <textarea 
+                disabled={state.isGenerating} 
+                value={topic} 
+                onChange={(e) => setTopic(e.target.value)} 
+                placeholder="Story idea or video prompt..." 
+                className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-4 py-3 text-sm outline-none h-32 focus:ring-2 ring-indigo-500/50 resize-none" 
+                required 
+              />
+              
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-500 uppercase">Language</label>
+                  <select value={language} onChange={(e) => setLanguage(e.target.value as Language)} className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-4 py-2 text-xs outline-none">
                     {LANGUAGES.map(l => <option key={l} value={l}>{l}</option>)}
                   </select>
                 </div>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">Tone</label>
-                  <select value={style} onChange={(e) => setStyle(e.target.value)} className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-sm focus:ring-2 focus:ring-pink-500/50 outline-none">
-                    {STYLES.map(s => <option key={s} value={s}>{s}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">Voice</label>
-                  <select value={voice} onChange={(e) => setVoice(e.target.value as VoiceName)} className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2 text-sm focus:ring-2 focus:ring-pink-500/50 outline-none">
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-500 uppercase">Voice</label>
+                  <select value={voice} onChange={(e) => setVoice(e.target.value as VoiceName)} className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-4 py-2 text-xs outline-none">
                     {VOICES.map(v => <option key={v} value={v}>{v}</option>)}
                   </select>
                 </div>
               </div>
-              <button type="submit" disabled={state.isGenerating || state.isGeneratingImages || !topic.trim()} className="w-full bg-gradient-to-r from-pink-600 to-violet-600 hover:from-pink-500 hover:to-violet-500 disabled:opacity-50 text-white font-bold py-3 px-6 rounded-xl flex items-center justify-center gap-2 shadow-lg transition-all">
-                {state.isGenerating || state.isGeneratingImages ? <Loader2 className="w-5 h-5 animate-spin" /> : <>Generate Viral Kit <ArrowRight className="w-5 h-5" /></>}
+
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-slate-500 uppercase">Video Type</label>
+                <select value={videoType} onChange={(e) => setVideoType(e.target.value)} className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-4 py-2 text-xs outline-none">
+                  {VIDEO_TYPES.map(vt => <option key={vt} value={vt}>{vt}</option>)}
+                </select>
+              </div>
+
+              <button 
+                type="submit" 
+                disabled={state.isGenerating || !topic.trim()} 
+                className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold py-4 px-6 rounded-2xl flex items-center justify-center gap-2 shadow-xl shadow-indigo-600/20 transition-all active:scale-[0.98]"
+              >
+                {state.isGenerating ? <Loader2 className="w-5 h-5 animate-spin" /> : <>Generate Viral Kit <ArrowRight className="w-5 h-5" /></>}
               </button>
             </form>
           </div>
-          {state.error && <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-4 text-red-400 text-sm">{state.error}</div>}
-        </section>
+          {state.error && <div className="bg-red-500/10 border border-red-500/20 p-4 rounded-2xl text-red-400 text-xs">{state.error}</div>}
+        </aside>
 
-        <section className="lg:col-span-8 space-y-8">
-          {state.content ? (
-            <div className="animate-in fade-in slide-in-from-bottom-4 duration-500 space-y-6">
-              <div className="flex p-1 bg-slate-900 border border-slate-800 rounded-xl w-fit overflow-x-auto">
-                {[
-                  { id: 'story', icon: ImageIcon, label: 'Story Preview' },
-                  { id: 'youtube', icon: Youtube, label: 'YouTube Kit' },
-                  { id: 'instagram', icon: Instagram, label: 'Instagram Kit' },
-                  { id: 'facebook', icon: Facebook, label: 'Facebook Kit' },
-                ].map(tab => (
-                  <button key={tab.id} onClick={() => setActiveTab(tab.id as TabType)} className={`px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2 whitespace-nowrap ${activeTab === tab.id ? 'bg-slate-800 text-white shadow-lg' : 'text-slate-400 hover:text-white'}`}>
-                    <tab.icon className={`w-3.5 h-3.5 ${tab.id === 'youtube' ? 'text-red-500' : tab.id === 'instagram' ? 'text-pink-500' : tab.id === 'facebook' ? 'text-blue-500' : ''}`} />
-                    {tab.label}
-                  </button>
+        {/* Content Area */}
+        <section className="lg:col-span-8 space-y-6">
+          <div className="flex p-1 bg-slate-900 border border-slate-800 rounded-xl w-fit shadow-xl">
+            {['story', 'youtube', 'instagram', 'facebook', 'vault'].map(id => (
+              <button 
+                key={id} 
+                onClick={() => setActiveTab(id as any)} 
+                className={`px-5 py-2 rounded-xl text-[10px] font-bold transition-all uppercase tracking-widest ${activeTab === id ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}
+              >
+                {id}
+              </button>
+            ))}
+          </div>
+
+          <div className="animate-in fade-in slide-in-from-bottom-2 duration-500">
+            {activeTab === 'vault' ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {savedScripts.length === 0 && <p className="text-slate-500 text-center col-span-2 py-24">No saved kits yet.</p>}
+                {savedScripts.map(s => (
+                  <div key={s.id} onClick={() => handleLoadSaved(s)} className="bg-slate-900 border border-slate-800 p-5 rounded-[2rem] cursor-pointer hover:border-indigo-500 group transition-all">
+                    <div className="flex justify-between items-center mb-4">
+                      <span className="text-[10px] font-bold bg-indigo-500/10 text-indigo-400 px-3 py-1 rounded-full uppercase">{s.language}</span>
+                      <button onClick={(e) => { e.stopPropagation(); setSavedScripts(prev => prev.filter(x => x.id !== s.id)); }} className="text-slate-600 hover:text-red-500"><Trash2 className="w-4 h-4" /></button>
+                    </div>
+                    <h4 className="text-sm font-bold text-slate-100 truncate">{s.topic}</h4>
+                    <p className="text-[10px] text-slate-500">{new Date(s.timestamp).toLocaleDateString()}</p>
+                  </div>
                 ))}
               </div>
+            ) : state.content ? (
+              <div className="space-y-6">
+                {activeTab === 'story' && (
+                  <div className="space-y-8">
+                    {/* Header Controls */}
+                    <div className="bg-indigo-600/10 border border-indigo-500/20 rounded-[2.5rem] p-8 flex flex-col lg:flex-row items-center justify-between gap-6 shadow-xl">
+                      <div className="text-center lg:text-left">
+                        <h3 className="text-2xl font-black italic tracking-tight mb-1">EXPORT CENTER</h3>
+                        <p className="text-[10px] text-indigo-400 font-bold uppercase tracking-widest flex items-center justify-center lg:justify-start gap-2">
+                           <Globe className="w-3 h-3" /> {state.language} Content
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap items-center justify-center gap-3">
+                        <div className="flex bg-slate-950 p-1 rounded-2xl border border-slate-800">
+                          <select value={quality} onChange={(e) => setQuality(e.target.value as VideoQuality)} className="bg-transparent text-[10px] font-bold px-4 py-2 outline-none">
+                            {QUALITIES.map(q => <option key={q} value={q}>{q}</option>)}
+                          </select>
+                        </div>
+                        <div className="flex gap-2">
+                          <button onClick={() => handleDownloadAudio('wav')} disabled={!state.audioBlobWav} className="bg-slate-800 hover:bg-slate-700 text-white px-5 py-3 rounded-2xl text-[10px] font-bold flex items-center gap-2 border border-slate-700 transition-colors">
+                            <Download className="w-4 h-4" /> WAV
+                          </button>
+                          <button onClick={() => handleDownloadAudio('mp3')} disabled={!state.audioBlobMp3} className="bg-slate-800 hover:bg-slate-700 text-white px-5 py-3 rounded-2xl text-[10px] font-bold flex items-center gap-2 border border-slate-700 transition-colors">
+                            <Music className="w-4 h-4" /> MP3
+                          </button>
+                        </div>
+                        <button onClick={handleDownloadVideo} disabled={videoProgress !== null} className="bg-indigo-600 hover:bg-indigo-500 text-white px-8 py-3 rounded-2xl text-[10px] font-bold flex items-center gap-2 shadow-lg shadow-indigo-600/20 transition-all active:scale-95">
+                          {videoProgress !== null ? <Loader2 className="w-4 h-4 animate-spin" /> : <Video className="w-4 h-4" />} {videoProgress !== null ? `${videoProgress}%` : 'EXPORT VIDEO'}
+                        </button>
+                      </div>
+                    </div>
 
-              {activeTab === 'story' ? (
-                <div className="space-y-6">
-                  <div className="bg-gradient-to-r from-slate-900 to-slate-800 border border-slate-700 rounded-3xl p-6 shadow-2xl space-y-4">
-                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
-                      <div className="space-y-1">
-                        <h3 className="text-2xl font-black viral-font text-white italic">Export Center</h3>
-                        <p className="text-slate-400 text-sm">Download audio and high-quality video.</p>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                      <div className="bg-slate-900 border border-slate-800 p-8 rounded-[2rem] space-y-6 shadow-xl h-fit">
+                        <h4 className="text-[10px] font-black text-indigo-400 uppercase tracking-widest flex items-center gap-2"><Mic className="w-4 h-4" /> Script Preview</h4>
+                        <p className="text-xl font-black text-white italic leading-tight">"{state.content.script.hook}"</p>
+                        <p className="text-sm text-slate-400 leading-relaxed">{state.content.script.body}</p>
+                        {state.audioUrl && (
+                          <div className="pt-4 border-t border-slate-800">
+                            <audio controls src={state.audioUrl} className="w-full h-10 rounded-xl accent-indigo-500" />
+                          </div>
+                        )}
                       </div>
-                      <div className="flex flex-wrap items-center gap-3">
-                        <div className="flex items-center gap-2 bg-slate-900/50 p-1.5 rounded-xl border border-slate-700">
-                           <Monitor className="w-4 h-4 text-slate-500 ml-1" />
-                           <select 
-                             value={quality} 
-                             onChange={(e) => setQuality(e.target.value as VideoQuality)}
-                             className="bg-transparent text-xs font-bold text-slate-300 outline-none pr-1"
-                           >
-                             {QUALITIES.map(q => <option key={q} value={q}>{q}</option>)}
-                           </select>
-                        </div>
-                        <button onClick={() => handleDownloadAudio('wav')} className="bg-slate-800 hover:bg-slate-700 text-white px-3 py-2 rounded-xl border border-slate-700 flex items-center gap-2 text-xs font-bold"><Download className="w-4 h-4" /> WAV</button>
-                        <button onClick={() => handleDownloadAudio('mp3')} className="bg-slate-800 hover:bg-slate-700 text-white px-3 py-2 rounded-xl border border-slate-700 flex items-center gap-2 text-xs font-bold"><Music className="w-4 h-4" /> MP3</button>
-                        <button onClick={handleDownloadVideo} disabled={videoProgress !== null} className="bg-gradient-to-r from-pink-600 to-violet-600 text-white px-6 py-2 rounded-xl flex items-center gap-2 text-sm font-bold shadow-lg">
-                          {videoProgress !== null ? <><Loader2 className="w-4 h-4 animate-spin" /> {videoProgress}%</> : <><Video className="w-4 h-4" /> Export MP4 ({quality})</>}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6">
-                      <h4 className="text-xs font-bold text-pink-400 uppercase tracking-widest mb-4">Live Script</h4>
-                      <p className="text-lg font-bold text-white leading-tight italic mb-4">"{state.content.script.hook}"</p>
-                      <p className="text-slate-300 text-sm leading-relaxed mb-6">{state.content.script.body}</p>
-                      <audio ref={audioRef} src={state.audioUrl || undefined} className="w-full h-10 accent-pink-500" controls />
-                    </div>
-                    <div className="grid grid-cols-2 gap-4">
-                      {state.content.template.frames.map(f => (
-                        <div key={f.id} className="aspect-[9/16] bg-slate-800 rounded-lg overflow-hidden relative group">
-                          {f.imageUrl && !regeneratingFrames[f.id] ? (
-                            <>
-                              <img src={f.imageUrl} className="w-full h-full object-cover transition-transform group-hover:scale-110 duration-700" />
-                              <div className="absolute top-2 right-2 flex flex-col gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                                <button 
-                                  onClick={() => handleRegenerateImage(f.id)}
-                                  className="p-1.5 bg-black/60 backdrop-blur-md rounded-lg text-white hover:bg-pink-600 transition-colors"
-                                  title="Regenerate this frame"
-                                >
-                                  <RefreshCw className="w-3.5 h-3.5" />
-                                </button>
-                                <button 
-                                  onClick={() => {
-                                    const a = document.createElement('a');
-                                    a.href = f.imageUrl!;
-                                    a.download = `frame-${f.id}.png`;
-                                    a.click();
-                                  }}
-                                  className="p-1.5 bg-black/60 backdrop-blur-md rounded-lg text-white hover:bg-violet-600 transition-colors"
-                                  title="Download frame"
-                                >
-                                  <Download className="w-3.5 h-3.5" />
-                                </button>
+
+                      <div className="grid grid-cols-2 gap-4">
+                        {state.content.template.frames.map(f => (
+                          <div key={f.id} className="aspect-[9/16] bg-slate-950 rounded-[2rem] overflow-hidden relative border border-slate-800 shadow-xl group">
+                            {frameStatuses[f.id] === 'loading' ? (
+                              <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900/50 backdrop-blur-sm">
+                                <Loader2 className="w-6 h-6 animate-spin text-indigo-500 mb-2" />
+                                <span className="text-[8px] font-bold text-slate-500">GENERATING...</span>
                               </div>
-                            </>
-                          ) : (
-                            <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center bg-slate-900/80">
-                              <Loader2 className="w-6 h-6 animate-spin text-pink-500 mb-2" />
-                              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
-                                {regeneratingFrames[f.id] ? "Regenerating..." : "Asset Pending"}
-                              </span>
-                              {!f.imageUrl && !regeneratingFrames[f.id] && (
-                                <button 
-                                  onClick={() => handleRegenerateImage(f.id)}
-                                  className="mt-3 px-3 py-1 bg-slate-800 hover:bg-slate-700 rounded-full text-[10px] font-bold flex items-center gap-1.5 border border-slate-700"
-                                >
-                                  <RefreshCw className="w-3 h-3" /> Retry
-                                </button>
-                              )}
+                            ) : f.imageUrl ? (
+                              <>
+                                <img src={f.imageUrl} className="w-full h-full object-cover transition-transform group-hover:scale-110 duration-[2s]" alt={f.visual} />
+                                <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity">
+                                  <button onClick={() => generateImage(f.visual, videoType)} className="p-2 bg-black/60 backdrop-blur-md rounded-xl text-white hover:bg-indigo-600 transition-colors shadow-lg">
+                                    <RefreshCw className="w-4 h-4" />
+                                  </button>
+                                </div>
+                              </>
+                            ) : (
+                              <div className="flex items-center justify-center h-full text-slate-700">
+                                <ImageIcon className="w-8 h-8 opacity-10" />
+                              </div>
+                            )}
+                            <div className="absolute bottom-0 inset-x-0 p-4 bg-gradient-to-t from-black via-black/40 to-transparent">
+                               <p className="text-[9px] font-bold text-white leading-tight drop-shadow-lg line-clamp-3">{f.text}</p>
                             </div>
-                          )}
-                          <div className="absolute inset-x-0 bottom-0 p-2 bg-black/60 backdrop-blur-sm text-[8px] font-medium leading-tight text-white border-t border-white/5">{f.text}</div>
-                          <div className="absolute top-2 left-2 px-1.5 py-0.5 bg-black/60 backdrop-blur-md rounded text-[8px] font-bold text-white border border-white/10">{f.id}</div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              ) : activeTab === 'youtube' ? (
-                <div className="bg-slate-900/80 border border-slate-800 rounded-3xl p-8 space-y-6">
-                  <div className="flex items-center gap-4"><Youtube className="w-8 h-8 text-red-500" /><div><h3 className="text-xl font-bold">YouTube Studio</h3></div></div>
-                  <MetadataField label="Viral Title" value={state.content.youtubeMetadata.title} icon={Sparkles} filename="youtube-title" />
-                  <MetadataField label="Description" value={state.content.youtubeMetadata.description} icon={FileText} filename="youtube-desc" />
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <label className="text-xs font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2"><FileCode className="w-3 h-3" /> SEO Tags</label>
-                      <div className="flex gap-2">
-                        <button onClick={() => handleCopy(state.content!.youtubeMetadata.tags.join(', '))} className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors">
-                          <Copy className="w-3.5 h-3.5" />
-                        </button>
-                        <button onClick={() => handleDownloadText(state.content!.youtubeMetadata.tags.join(', '), 'youtube-tags')} className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors">
-                          <Download className="w-3.5 h-3.5" />
-                        </button>
+                            <div className="absolute top-4 left-4 w-6 h-6 bg-indigo-600 rounded-full flex items-center justify-center text-[10px] font-black shadow-lg">{f.id}</div>
+                          </div>
+                        ))}
                       </div>
                     </div>
-                    <div className="flex flex-wrap gap-2 p-4 bg-slate-950 border border-slate-800 rounded-xl">
-                      {state.content.youtubeMetadata.tags.map((t, i) => <span key={i} className="px-3 py-1 bg-slate-900 border border-slate-700 rounded-full text-xs text-slate-400">#{t.replace(/\s+/g, '')}</span>)}
-                    </div>
                   </div>
-                </div>
-              ) : activeTab === 'instagram' ? (
-                <div className="bg-slate-900/80 border border-slate-800 rounded-3xl p-8 space-y-6">
-                  <div className="flex items-center gap-4"><Instagram className="w-8 h-8 text-pink-500" /><div><h3 className="text-xl font-bold">Instagram Creator</h3></div></div>
-                  <MetadataField label="Reels Caption" value={state.content.instagramMetadata.caption} icon={FileText} filename="insta-caption" />
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <label className="text-xs font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2"><Hash className="w-3 h-3" /> Trending Hashtags</label>
-                      <div className="flex gap-2">
-                        <button onClick={() => handleCopy(state.content!.instagramMetadata.hashtags.map(h => `#${h.replace(/\s+/g, '')}`).join(' '))} className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors">
-                          <Copy className="w-3.5 h-3.5" />
-                        </button>
-                        <button onClick={() => handleDownloadText(state.content!.instagramMetadata.hashtags.map(h => `#${h.replace(/\s+/g, '')}`).join(' '), 'insta-hashtags')} className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors">
-                          <Download className="w-3.5 h-3.5" />
-                        </button>
+                )}
+                {activeTab === 'youtube' && (
+                  <div className="bg-slate-900 border border-slate-800 p-10 rounded-[3rem] space-y-8 shadow-2xl">
+                    <div className="flex items-center gap-4"><Youtube className="w-8 h-8 text-red-500" /><h3 className="text-2xl font-black italic">YouTube Shorts Kit</h3></div>
+                    <div className="space-y-4">
+                      <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block">Catchy Title</label>
+                      <div className="p-6 bg-slate-950 border border-slate-800 rounded-2xl text-lg font-bold text-white">{state.content.youtubeMetadata.title}</div>
+                    </div>
+                    <div className="space-y-4">
+                      <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block">Tags</label>
+                      <div className="flex flex-wrap gap-2">
+                        {state.content.youtubeMetadata.tags.map(t => <span key={t} className="px-4 py-2 bg-slate-800 border border-slate-700 rounded-xl text-xs font-bold text-indigo-400">#{t.replace(/\s+/g, '')}</span>)}
                       </div>
                     </div>
-                    <div className="p-4 bg-slate-950 border border-slate-800 rounded-xl text-pink-400 font-mono text-xs">
-                      {state.content.instagramMetadata.hashtags.map(h => `#${h.replace(/\s+/g, '')}`).join(' ')}
+                  </div>
+                )}
+                {activeTab === 'instagram' && (
+                  <div className="bg-slate-900 border border-slate-800 p-10 rounded-[3rem] space-y-8 shadow-2xl">
+                    <div className="flex items-center gap-4"><Instagram className="w-8 h-8 text-pink-500" /><h3 className="text-2xl font-black italic">Instagram Reels Kit</h3></div>
+                    <div className="p-8 bg-slate-950 border border-slate-800 rounded-[2rem] text-sm leading-relaxed whitespace-pre-wrap text-slate-300 italic">
+                      {state.content.instagramMetadata.caption}
+                      <div className="mt-6 flex flex-wrap gap-2 text-indigo-400 font-mono text-xs">
+                        {state.content.instagramMetadata.hashtags.map(h => <span key={h}>#{h.replace(/\s+/g, '')}</span>)}
+                      </div>
                     </div>
                   </div>
-                </div>
-              ) : (
-                <div className="bg-slate-900/80 border border-slate-800 rounded-3xl p-8 space-y-6">
-                  <div className="flex items-center gap-4"><Facebook className="w-8 h-8 text-blue-500" /><div><h3 className="text-xl font-bold">Facebook Business</h3></div></div>
-                  <MetadataField label="Post Caption" value={state.content.facebookMetadata.caption} icon={FileText} filename="fb-caption" />
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="h-full flex flex-col items-center justify-center text-center p-12 bg-slate-900/30 border-2 border-dashed border-slate-800 rounded-3xl">
-              <Sparkles className="w-12 h-12 text-slate-700 mb-6" />
-              <h3 className="text-xl font-bold text-slate-400 mb-2">Ready to go viral?</h3>
-              <p className="text-slate-500 max-w-sm text-sm">Select a niche from the categories or enter a custom topic to generate your full Social Media Kit.</p>
-            </div>
-          )}
+                )}
+                {activeTab === 'facebook' && (
+                  <div className="bg-slate-900 border border-slate-800 p-10 rounded-[3rem] space-y-8 shadow-2xl">
+                    <div className="flex items-center gap-4"><Facebook className="w-8 h-8 text-blue-500" /><h3 className="text-2xl font-black italic">Facebook Post Kit</h3></div>
+                    <div className="p-8 bg-slate-950 border border-slate-800 rounded-[2rem] text-sm leading-relaxed text-slate-300 italic">
+                      {state.content.facebookMetadata.caption}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="h-96 flex flex-col items-center justify-center text-center p-12 bg-slate-900/30 border-2 border-dashed border-slate-800 rounded-[3.5rem] shadow-inner">
+                <Sparkles className="w-12 h-12 text-slate-800 mb-8" />
+                <h3 className="text-2xl font-black text-slate-400 mb-2 italic tracking-tight">AI CREATOR READY</h3>
+                <p className="text-slate-600 text-sm max-w-sm">Select your niche and topic to synthesize a complete viral content kit using the world's most advanced Gemini models.</p>
+              </div>
+            )}
+          </div>
         </section>
       </main>
-
-      <footer className="border-t border-slate-800 py-8 bg-slate-900/30 mt-auto">
-        <div className="max-w-7xl mx-auto px-4 text-center text-slate-500 text-xs">
-          © 2024 ViralVox AI • Multi-Platform Creator Suite
+      
+      <footer className="border-t border-slate-800 py-10 mt-auto bg-slate-950/50 backdrop-blur-sm">
+        <div className="max-w-7xl mx-auto px-4 flex flex-col md:flex-row items-center justify-between gap-6">
+          <p className="text-[10px] font-black text-slate-600 uppercase tracking-[0.4em]">ViralVox Synthesizer Engine v3.0</p>
+          <div className="flex flex-wrap justify-center gap-8 items-center text-[9px] font-black text-slate-500 uppercase tracking-[0.2em]">
+            <span className="flex items-center gap-2"><div className="w-2 h-2 rounded-full bg-green-500 shadow-lg shadow-green-500/50"></div> Gemini 2.5 Active</span>
+            <span className="flex items-center gap-2"><Globe className="w-3.5 h-3.5 text-indigo-500" /> Multilingual Mode</span>
+          </div>
         </div>
       </footer>
-      <style>{`.custom-scrollbar::-webkit-scrollbar { width: 4px; } .custom-scrollbar::-webkit-scrollbar-track { background: #020617; } .custom-scrollbar::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 10px; }`}</style>
     </div>
   );
 }

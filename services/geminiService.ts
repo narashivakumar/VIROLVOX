@@ -1,37 +1,45 @@
-
 import { GoogleGenAI, Type, Modality } from "@google/genai";
 import { GeneratedContent, VoiceName, Language } from "../types";
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+// Always initialize fresh to ensure latest environment key
+const getAI = () => new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
 
+function sanitizeJson(jsonStr: string): string {
+  return jsonStr
+    .replace(/^```json\n?/, '')
+    .replace(/\n?```$/, '')
+    .trim();
+}
+
+/**
+ * Generates viral script, frames, and social metadata using Gemini 3 Flash
+ */
 export async function generateViralContent(
   topic: string, 
-  style: string, 
+  videoType: string, 
+  tone: string,
   language: Language = 'English',
   niche?: string
 ): Promise<GeneratedContent> {
+  const ai = getAI();
   const languageInstruction = language === 'English' 
     ? 'The script and metadata MUST be in English.' 
-    : `The script and metadata (except technical descriptions) MUST be in ${language}. Ensure correct ${language} script characters are used. However, keep the "visual" descriptions for image generation in descriptive English for better quality.`;
-
-  const nicheContext = niche ? `specifically tailored for the "${niche}" niche` : '';
+    : `The script, titles, descriptions, and captions MUST be generated in ${language} using its native script characters. 
+       MANDATORY: Translate all spoken and written content naturally into ${language}.
+       IMPORTANT: The "visual" descriptions for image generation MUST remain in descriptive English to ensure high-quality AI image results.`;
 
   const prompt = `
-    Create a complete viral social media kit ${nicheContext} for the topic: "${topic}" in a "${style}" style.
-    
+    Create a complete viral social media kit for a "${videoType}" video about "${topic}".
+    Niche Context: "${niche || 'General'}"
+    Target Tone: "${tone}"
     ${languageInstruction}
 
-    Deliver:
-    1. A script with hook, body, and cta. The hook must be extremely catchy for short-form video (0-3 seconds).
-    2. A 5-frame story template with detailed visual prompts and captions. The "visual" part should be a detailed prompt for an image generator.
-    3. YouTube Kit: High CTR Title, Description (with timestamps), and 10 Tags.
-    4. Instagram Kit: A viral caption with a "Follow for daily motivation" style CTA and 6 trending hashtags.
-    5. Facebook Kit: An engagement-focused caption ending with a specific community prompt like "If you agree, comment YES 👇".
+    Return a valid JSON object matching the requested schema. Ensure the "hook" is extremely catchy and native to the selected language.
   `;
 
   const response = await ai.models.generateContent({
     model: 'gemini-3-flash-preview',
-    contents: prompt,
+    contents: [{ parts: [{ text: prompt }] }],
     config: {
       responseMimeType: "application/json",
       responseSchema: {
@@ -56,8 +64,8 @@ export async function generateViralContent(
                   type: Type.OBJECT,
                   properties: {
                     id: { type: Type.INTEGER },
-                    visual: { type: Type.STRING },
-                    text: { type: Type.STRING },
+                    visual: { type: Type.STRING, description: "Detailed English visual prompt for Gemini Image" },
+                    text: { type: Type.STRING, description: "Caption text in the target language script" },
                     timing: { type: Type.STRING }
                   },
                   required: ["id", "visual", "text", "timing"]
@@ -98,14 +106,17 @@ export async function generateViralContent(
     }
   });
 
-  const result = JSON.parse(response.text || '{}');
-  return result as GeneratedContent;
+  const sanitized = sanitizeJson(response.text || '{}');
+  return JSON.parse(sanitized) as GeneratedContent;
 }
 
-export async function generateSpeech(text: string, voice: VoiceName, language: Language = 'English'): Promise<string> {
-  const instruction = language === 'English' 
-    ? `Read this with high energy and a viral social media vibe: ${text}`
-    : `Read this social media script in ${language} with natural, engaging tone. Text: ${text}`;
+/**
+ * Generates speech audio using Gemini 2.5 Flash TTS
+ */
+export async function generateSpeech(text: string, voice: VoiceName, tone: string, language: Language = 'English'): Promise<string> {
+  const ai = getAI();
+  const instruction = `Perform this social media voiceover in ${language}. Tone: ${tone}. Speak naturally and engagingly.
+  TEXT: "${text}"`;
 
   const response = await ai.models.generateContent({
     model: "gemini-2.5-flash-preview-tts",
@@ -121,25 +132,28 @@ export async function generateSpeech(text: string, voice: VoiceName, language: L
   });
 
   const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-  if (!base64Audio) throw new Error("Failed to generate audio");
+  if (!base64Audio) throw new Error("Audio synthesis failed.");
   return base64Audio;
 }
 
-export async function generateImage(prompt: string, style: string): Promise<string> {
+/**
+ * Generates an image using Gemini 2.5 Flash Image
+ */
+export async function generateImage(prompt: string, videoType: string): Promise<string> {
+  const ai = getAI();
   const response = await ai.models.generateContent({
     model: 'gemini-2.5-flash-image',
-    contents: { 
-      parts: [{ 
-        text: `Cinematic professional photography, high-quality, 8k resolution, 9:16 vertical ratio. Style: ${style}. Scene: ${prompt}` 
-      }] 
+    contents: {
+      parts: [{ text: `High-quality cinematic vertical 9:16 viral ${videoType} content: ${prompt}` }],
     },
     config: {
-      imageConfig: { aspectRatio: "9:16" }
-    }
+      imageConfig: {
+        aspectRatio: "9:16"
+      }
+    },
   });
 
-  for (const part of response.candidates[0].content.parts) {
-    if (part.inlineData) return `data:image/png;base64,${part.inlineData.data}`;
-  }
-  throw new Error("No image generated");
+  const part = response.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+  if (!part?.inlineData?.data) throw new Error("Image generation failed.");
+  return `data:image/png;base64,${part.inlineData.data}`;
 }
