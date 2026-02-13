@@ -1,0 +1,7 @@
+{
+  "name": "ViralVox - Audio Story Generator",
+  "description": "Create viral-ready scripts and AI-powered audio stories for TikTok, Reels, and Shorts. Generate engaging templates and high-quality voiceovers in seconds.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
